@@ -3,7 +3,22 @@
 import { useState, useEffect, useRef, use } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Star, Clock, Calendar, CheckCircle2, Save, FileText, Download, Eye, Play, RotateCcw } from 'lucide-react';
+import {
+  ArrowLeft,
+  Star,
+  Clock,
+  Calendar,
+  CheckCircle2,
+  Save,
+  FileText,
+  Download,
+  Eye,
+  Play,
+  Pause,
+  RotateCcw,
+  FastForward,
+  Rewind,
+} from 'lucide-react';
 import { Navbar } from '@/components/ui/Navbar';
 import { IVideo } from '@/types';
 
@@ -26,6 +41,23 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
   const [isFavorite, setIsFavorite] = useState(false);
   const [watchPercentage, setWatchPercentage] = useState(0);
   const [status, setStatus] = useState<'not_started' | 'watching' | 'completed'>('not_started');
+
+  // Visual feedback state for keyboard shortcuts (+5s, -5s, Play, Pause)
+  const [feedback, setFeedback] = useState<{
+    type: 'forward' | 'rewind' | 'play' | 'pause';
+    id: number;
+  } | null>(null);
+  const feedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const triggerFeedback = (type: 'forward' | 'rewind' | 'play' | 'pause') => {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    setFeedback({ type, id: Date.now() });
+    feedbackTimerRef.current = setTimeout(() => {
+      setFeedback(null);
+    }, 700);
+  };
+
+  const isPdf = video?.mediaType === 'pdf' || video?.mimeType === 'application/pdf';
 
   const fetchVideoDetails = async () => {
     try {
@@ -59,6 +91,45 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
   useEffect(() => {
     fetchVideoDetails();
   }, [id]);
+
+  // Global Keyboard Shortcuts Listener:
+  // Right Arrow: +5s | Left Arrow: -5s | Space: Pause/Play
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore shortcuts when user is typing in text inputs or textareas
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+
+      if (!videoRef.current || isPdf) return;
+
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        if (videoRef.current.paused) {
+          videoRef.current.play().catch(() => {});
+          triggerFeedback('play');
+        } else {
+          videoRef.current.pause();
+          triggerFeedback('pause');
+        }
+      } else if (e.code === 'ArrowRight' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const duration = videoRef.current.duration || video?.duration || 0;
+        videoRef.current.currentTime = Math.min(duration, videoRef.current.currentTime + 5);
+        triggerFeedback('forward');
+      } else if (e.code === 'ArrowLeft' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 5);
+        triggerFeedback('rewind');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [video, isPdf]);
 
   // Automatically attempt playback when video element and data are ready
   const handleVideoLoaded = () => {
@@ -198,8 +269,6 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const isPdf = video.mediaType === 'pdf' || video.mimeType === 'application/pdf';
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       <Navbar user={authData?.user} channel={authData?.channel} />
@@ -276,18 +345,43 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
               />
             </div>
           ) : (
-            <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
-              {/* Elegant Video Loading Overlay (suppressed in final 5% of video or when ended) */}
+            <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden group">
+              {/* Simple & Minimal Video Loading Overlay */}
               {isVideoLoading && !isEnded && watchPercentage < 95 && (
-                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/85 backdrop-blur-md transition-opacity duration-300">
-                  <div className="relative flex items-center justify-center mb-3">
-                    <div className="w-14 h-14 rounded-full border-4 border-cyan-500/20 border-t-cyan-400 animate-spin" />
-                    <div className="absolute w-8 h-8 rounded-full bg-cyan-500/10 border border-cyan-400/30 flex items-center justify-center">
-                      <Play className="w-4 h-4 text-cyan-400 fill-current animate-pulse" />
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/75 backdrop-blur-sm transition-opacity duration-300">
+                  <div className="w-10 h-10 rounded-full border-3 border-cyan-500/20 border-t-cyan-400 animate-spin mb-2" />
+                  <span className="text-xs font-medium text-slate-300 tracking-wide">Loading video...</span>
+                </div>
+              )}
+
+              {/* Keyboard Action Feedback Overlay Visualizations */}
+              {feedback && (
+                <div className="absolute inset-0 z-25 pointer-events-none flex items-center justify-center">
+                  {feedback.type === 'forward' && (
+                    <div className="absolute right-12 flex items-center gap-2 px-5 py-3 rounded-2xl bg-slate-950/85 backdrop-blur-md border border-cyan-500/40 text-cyan-400 shadow-2xl animate-bounce">
+                      <FastForward className="w-6 h-6 fill-cyan-400/20" />
+                      <span className="text-sm font-bold font-mono tracking-wider">+5s</span>
                     </div>
-                  </div>
-                  <p className="text-xs font-bold text-slate-100 tracking-wide uppercase">Preparing Video Segment...</p>
-                  <p className="text-[11px] text-slate-400 font-mono mt-1">Pre-buffering initial 4MB segment</p>
+                  )}
+
+                  {feedback.type === 'rewind' && (
+                    <div className="absolute left-12 flex items-center gap-2 px-5 py-3 rounded-2xl bg-slate-950/85 backdrop-blur-md border border-cyan-500/40 text-cyan-400 shadow-2xl animate-bounce">
+                      <Rewind className="w-6 h-6 fill-cyan-400/20" />
+                      <span className="text-sm font-bold font-mono tracking-wider">-5s</span>
+                    </div>
+                  )}
+
+                  {feedback.type === 'play' && (
+                    <div className="p-5 rounded-full bg-slate-950/85 backdrop-blur-md border border-cyan-500/40 text-cyan-400 shadow-2xl animate-ping">
+                      <Play className="w-8 h-8 fill-current" />
+                    </div>
+                  )}
+
+                  {feedback.type === 'pause' && (
+                    <div className="p-5 rounded-full bg-slate-950/85 backdrop-blur-md border border-cyan-500/40 text-cyan-400 shadow-2xl">
+                      <Pause className="w-8 h-8 fill-current" />
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -375,9 +469,32 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
                 </span>
               </div>
 
+              {/* Keyboard Shortcuts Hint */}
+              <div className="pt-3 flex items-center gap-4 text-[11px] text-slate-400 border-t border-slate-800/60">
+                <span className="font-semibold text-slate-300">Shortcuts:</span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-400 font-mono text-[10px]">
+                    ←
+                  </kbd>{' '}
+                  -5s
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-400 font-mono text-[10px]">
+                    →
+                  </kbd>{' '}
+                  +5s
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-400 font-mono text-[10px]">
+                    Space
+                  </kbd>{' '}
+                  Play / Pause
+                </span>
+              </div>
+
               {/* Caption Description */}
               {video.caption && (
-                <div className="pt-4 border-t border-slate-800 text-sm text-slate-300 whitespace-pre-wrap leading-relaxed">
+                <div className="pt-3 border-t border-slate-800 text-sm text-slate-300 whitespace-pre-wrap leading-relaxed">
                   {video.caption}
                 </div>
               )}

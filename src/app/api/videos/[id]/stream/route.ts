@@ -31,16 +31,34 @@ export async function GET(
     const contentType = video.mimeType || (video.mediaType === 'pdf' ? 'application/pdf' : 'video/mp4');
 
     let start = 0;
-    let limitBytes = 2097152; // 2MB buffer per streaming chunk for smooth zero-buffering playback
+    let end = fileSize > 0 ? fileSize - 1 : 0;
 
     if (rangeHeader) {
       const parts = rangeHeader.replace(/bytes=/, '').split('-');
       start = parseInt(parts[0], 10) || 0;
-      if (parts[1]) {
-        const endReq = parseInt(parts[1], 10);
-        limitBytes = Math.max(524288, endReq - start + 1);
+
+      // Clamp start offset so it never exceeds end of file
+      if (fileSize > 0 && start >= fileSize) {
+        start = Math.max(0, fileSize - 1);
+      }
+
+      if (parts[1] && parts[1].trim() !== '') {
+        end = parseInt(parts[1], 10);
+      } else {
+        // If end omitted (e.g. bytes=0-), request up to 2MB chunk, strictly capped at fileSize - 1
+        end = fileSize > 0 ? Math.min(start + 2097152 - 1, fileSize - 1) : start + 2097152 - 1;
       }
     }
+
+    if (fileSize > 0 && end >= fileSize) {
+      end = fileSize - 1;
+    }
+
+    if (end < start) {
+      end = start;
+    }
+
+    const limitBytes = end - start + 1;
 
     const chunk = await downloadVideoChunk({
       sessionString: session.telegramSession,
@@ -50,9 +68,15 @@ export async function GET(
     });
 
     if (!chunk || chunk.length === 0) {
-      return new NextResponse(null, {
-        status: 416,
-        headers: { 'Content-Range': `bytes */${fileSize}` },
+      // Prevent 416 player freeze on end of file by returning 206 Partial Content
+      return new NextResponse(Buffer.alloc(0) as unknown as BodyInit, {
+        status: 206,
+        headers: {
+          'Content-Range': `bytes ${start}-${start}/${fileSize || start + 1}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': '0',
+          'Content-Type': contentType,
+        },
       });
     }
 

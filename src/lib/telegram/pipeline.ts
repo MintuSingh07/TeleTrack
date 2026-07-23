@@ -57,23 +57,42 @@ export async function cleanExpiredVideoCaches() {
   }
 }
 
+/**
+ * Robust segment downloader.
+ *
+ * KEY INSIGHT: Telegram's upload.getFile limit must be a multiple of 4096 AND
+ * a power-of-two multiple of 1024 in practice. Using a fixed 1MB (1048576)
+ * limit ALWAYS satisfies this. Telegram returns min(limit, remaining_bytes)
+ * so requesting 1MB at end-of-file just returns the remaining bytes.
+ *
+ * Previous attempts to "clamp" the limit to fileSize caused it to become
+ * a non-power-of-two value that Telegram silently rejected.
+ */
 export async function downloadSingleSegment(
   sessionString: string,
   video: IVideoDocument,
   segmentIndex: number
 ): Promise<Buffer> {
   const cachePath = getSegmentCachePath(video.telegramChatId, video.telegramMessageId, segmentIndex);
+  const fileSize = video.fileSize || 0;
+  const segmentStartOffset = segmentIndex * SEGMENT_SIZE;
 
+  // Validate cache: check it exists AND has the correct expected size
   if (fs.existsSync(cachePath)) {
     try {
-      return await fs.promises.readFile(cachePath);
+      const stats = await fs.promises.stat(cachePath);
+      const expectedSize = fileSize > 0
+        ? Math.min(SEGMENT_SIZE, fileSize - segmentStartOffset)
+        : SEGMENT_SIZE;
+      if (stats.size >= expectedSize) {
+        return await fs.promises.readFile(cachePath);
+      }
+      // Cache file exists but is incomplete — delete and re-download
+      await fs.promises.unlink(cachePath).catch(() => {});
     } catch (e) {
-      // Fallback
+      // Fallback to download
     }
   }
-
-  const segmentStartOffset = segmentIndex * SEGMENT_SIZE;
-  const fileSize = video.fileSize || 0;
 
   if (fileSize > 0 && segmentStartOffset >= fileSize) {
     return Buffer.alloc(0);
@@ -102,46 +121,74 @@ export async function downloadSingleSegment(
   if (!mediaDoc) return Buffer.alloc(0);
 
   const chunkBuffers: Buffer[] = [];
-  const chunkSize = 1024 * 1024; // 1MB max per Telegram MTProto upload.getFile RPC
+  // Always request exactly 1MB. This value is:
+  //  - A multiple of 4096 ✓
+  //  - A power-of-two multiple of 1024 ✓
+  //  - Under the Telegram MTProto maximum of 1MB ✓
+  // Telegram naturally returns fewer bytes when near end-of-file.
+  const CHUNK_SIZE = 1048576; // 1MB — NEVER change this
 
-  for (let currentOffset = segmentStartOffset; currentOffset < segmentEndOffset; currentOffset += chunkSize) {
+  let bytesCollected = 0;
+
+  for (let currentOffset = segmentStartOffset; currentOffset < segmentEndOffset; currentOffset += CHUNK_SIZE) {
+    // offset must be 4KB-aligned (1MB-aligned offsets always satisfy this)
     const alignedOffset = Math.floor(currentOffset / 4096) * 4096;
-    const bytesNeeded = segmentEndOffset - currentOffset;
-    // CRITICAL FIX: Align limit to 4096-byte boundary so Telegram MTProto upload.getFile RPC never rejects unaligned end bytes
-    const requestLimit = Math.min(chunkSize, Math.ceil(bytesNeeded / 4096) * 4096 || 4096);
 
-    const fileResult: any = await client.invoke(
-      new Api.upload.GetFile({
-        location: new Api.InputDocumentFileLocation({
-          id: mediaDoc.id,
-          accessHash: mediaDoc.accessHash,
-          fileReference: mediaDoc.fileReference,
-          thumbSize: '',
-        }),
-        offset: bigInt(alignedOffset),
-        limit: requestLimit,
-      })
-    );
+    try {
+      const fileResult: any = await client.invoke(
+        new Api.upload.GetFile({
+          location: new Api.InputDocumentFileLocation({
+            id: mediaDoc.id,
+            accessHash: mediaDoc.accessHash,
+            fileReference: mediaDoc.fileReference,
+            thumbSize: '',
+          }),
+          offset: bigInt(alignedOffset),
+          limit: CHUNK_SIZE, // ALWAYS 1MB — Telegram returns fewer bytes at EOF
+        })
+      );
 
-    if (fileResult && fileResult.bytes) {
-      const rawBuf = Buffer.from(fileResult.bytes);
-      const offsetDelta = currentOffset - alignedOffset;
-      const validBytes = rawBuf.subarray(offsetDelta, offsetDelta + bytesNeeded);
-      chunkBuffers.push(validBytes);
+      if (fileResult && fileResult.bytes) {
+        const rawBuf = Buffer.from(fileResult.bytes);
+
+        if (rawBuf.length === 0) break; // End of file reached
+
+        const offsetDelta = currentOffset - alignedOffset;
+        const remainingInSegment = segmentEndOffset - currentOffset;
+        const available = Math.max(0, rawBuf.length - offsetDelta);
+        const take = Math.min(remainingInSegment, available);
+
+        if (take > 0) {
+          chunkBuffers.push(rawBuf.subarray(offsetDelta, offsetDelta + take));
+          bytesCollected += take;
+        }
+
+        // If Telegram returned fewer bytes than requested, we've hit EOF
+        if (rawBuf.length < CHUNK_SIZE) break;
+      } else {
+        break; // No data returned
+      }
+    } catch (rpcErr: any) {
+      console.error(`[pipeline] GetFile RPC error seg=${segmentIndex} offset=${alignedOffset}:`, rpcErr?.message || rpcErr);
+      break;
     }
   }
 
-  const fullSegmentBuffer = Buffer.concat(chunkBuffers).subarray(0, totalSegmentBytes);
+  const fullSegmentBuffer = Buffer.concat(chunkBuffers);
+
   if (fullSegmentBuffer.length > 0) {
     await fs.promises.writeFile(cachePath, fullSegmentBuffer).catch(() => {});
+    console.log(`[pipeline] Cached segment ${segmentIndex} → ${fullSegmentBuffer.length} bytes (expected ${totalSegmentBytes})`);
+  } else {
+    console.error(`[pipeline] EMPTY segment ${segmentIndex} for "${video.title}" (expected ${totalSegmentBytes} bytes)`);
   }
 
   return fullSegmentBuffer;
 }
 
 /**
- * Aggressive Multi-Connection Parallel Downloader:
- * Launches 4 independent GramJS workers downloading Segments 0, 1, 2, 3... simultaneously.
+ * Sequential Pipeline Downloader:
+ * Downloads all video segments (0 to totalSegments-1) sequentially.
  */
 export async function startVideoDownloadPipeline(sessionString: string, video: IVideoDocument) {
   cleanExpiredVideoCaches().catch(() => {});
@@ -160,80 +207,36 @@ export async function startVideoDownloadPipeline(sessionString: string, video: I
     }
 
     const totalSegments = Math.ceil(fileSize / SEGMENT_SIZE);
-    const CONCURRENT_WORKERS = 4;
+    console.log(`[pipeline] Starting download for "${video.title}" — ${totalSegments} segments, ${fileSize} bytes`);
 
-    const workerPromises = Array.from({ length: CONCURRENT_WORKERS }, async (_, workerIndex) => {
-      const client = createTelegramClient(sessionString);
-      await client.connect();
+    for (let seg = 0; seg < totalSegments; seg++) {
+      const cachePath = getSegmentCachePath(video.telegramChatId, video.telegramMessageId, seg);
+
+      // Validate existing cache
+      if (fs.existsSync(cachePath)) {
+        try {
+          const stats = await fs.promises.stat(cachePath);
+          const expectedSize = Math.min(SEGMENT_SIZE, fileSize - seg * SEGMENT_SIZE);
+          if (stats.size >= expectedSize) {
+            continue; // Already fully cached
+          }
+          // Incomplete — delete and re-download
+          await fs.promises.unlink(cachePath).catch(() => {});
+        } catch (e) {
+          // Re-download
+        }
+      }
 
       try {
-        const dialogs = await client.getDialogs({});
-        const foundInDialogs = dialogs.find((d: any) => {
-          if (!d.entity) return false;
-          const idStr = d.entity.id?.toString() || d.entity.channelId?.toString();
-          return idStr === video.telegramChatId;
-        });
-
-        const entity = foundInDialogs ? foundInDialogs.entity : await client.getEntity(video.telegramChatId);
-        const messages = await client.getMessages(entity, { ids: [video.telegramMessageId] });
-
-        const message = messages[0];
-        if (!message || !message.media) return;
-
-        const mediaDoc = (message.media as any).document;
-        if (!mediaDoc) return;
-
-        for (let seg = workerIndex; seg < totalSegments; seg += CONCURRENT_WORKERS) {
-          const cachePath = getSegmentCachePath(video.telegramChatId, video.telegramMessageId, seg);
-          if (fs.existsSync(cachePath)) continue;
-
-          const segmentStartOffset = seg * SEGMENT_SIZE;
-          const segmentEndOffset = Math.min(segmentStartOffset + SEGMENT_SIZE, fileSize);
-          const totalSegmentBytes = segmentEndOffset - segmentStartOffset;
-          const chunkBuffers: Buffer[] = [];
-          const chunkSize = 1024 * 1024;
-
-          for (let currentOffset = segmentStartOffset; currentOffset < segmentEndOffset; currentOffset += chunkSize) {
-            const alignedOffset = Math.floor(currentOffset / 4096) * 4096;
-            const bytesNeeded = segmentEndOffset - currentOffset;
-            const requestLimit = Math.min(chunkSize, Math.ceil(bytesNeeded / 4096) * 4096 || 4096);
-
-            const fileResult: any = await client.invoke(
-              new Api.upload.GetFile({
-                location: new Api.InputDocumentFileLocation({
-                  id: mediaDoc.id,
-                  accessHash: mediaDoc.accessHash,
-                  fileReference: mediaDoc.fileReference,
-                  thumbSize: '',
-                }),
-                offset: bigInt(alignedOffset),
-                limit: requestLimit,
-              })
-            );
-
-            if (fileResult && fileResult.bytes) {
-              const rawBuf = Buffer.from(fileResult.bytes);
-              const offsetDelta = currentOffset - alignedOffset;
-              const validBytes = rawBuf.subarray(offsetDelta, offsetDelta + bytesNeeded);
-              chunkBuffers.push(validBytes);
-            }
-          }
-
-          const fullSegmentBuffer = Buffer.concat(chunkBuffers).subarray(0, totalSegmentBytes);
-          if (fullSegmentBuffer.length > 0) {
-            await fs.promises.writeFile(cachePath, fullSegmentBuffer).catch(() => {});
-          }
-        }
-      } catch (workerErr) {
-        // Log quietly
-      } finally {
-        await client.disconnect().catch(() => {});
+        await downloadSingleSegment(sessionString, video, seg);
+      } catch (err: any) {
+        console.error(`[pipeline] Error downloading segment ${seg} for "${video.title}":`, err?.message || err);
       }
-    });
+    }
 
-    await Promise.all(workerPromises);
-  } catch (error) {
-    console.error(`Pipeline download error for ${video.title}:`, error);
+    console.log(`[pipeline] Finished download for "${video.title}"`);
+  } catch (error: any) {
+    console.error(`[pipeline] Pipeline error for "${video.title}":`, error?.message || error);
   } finally {
     activePipelines.delete(pipelineKey);
   }
