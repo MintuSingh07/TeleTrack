@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Navbar } from '@/components/ui/Navbar';
 import { StatCard } from '@/components/ui/StatCard';
@@ -16,6 +16,8 @@ import {
   RefreshCw,
   FileText,
   ArrowDownUp,
+  Layers,
+  Grid,
 } from 'lucide-react';
 import { IVideo, IDashboardStats } from '@/types';
 
@@ -32,6 +34,7 @@ export default function DashboardPage() {
   const [activeFilter, setActiveFilter] = useState('all');
   const [activeSection, setActiveSection] = useState<'video' | 'pdf'>('video'); // Only Videos and PDFs
   const [sortOrder, setSortOrder] = useState<'upload_asc' | 'upload_desc'>('upload_asc'); // upload_asc = Upload Order (#1, #2...)
+  const [groupByModule, setGroupByModule] = useState(true); // Group items by 01_... module sequences
 
   const loadDashboardData = async () => {
     try {
@@ -95,6 +98,42 @@ export default function DashboardPage() {
       console.error('Favorite toggle error:', err);
     }
   };
+
+  // Dynamically group items into course modules whenever a title starts with "01_" or "01 "
+  const groupedModules = useMemo(() => {
+    if (!groupByModule || videos.length === 0) return [];
+
+    const modules: { id: number; title: string; videos: IVideo[] }[] = [];
+    let currentModule: { id: number; title: string; videos: IVideo[] } | null = null;
+    let moduleCounter = 1;
+
+    for (const item of videos) {
+      // Check if video title starts with "01_", "01 -", "01.", or "01 "
+      const isNewModuleStart = /^01[_\s\.\-]/i.test(item.title) || item.title.startsWith('01_');
+
+      if (isNewModuleStart || !currentModule) {
+        // Format clean module title from first video title
+        const cleanTopic = item.title
+          .replace(/^01[_\s\.\-]+/i, '')
+          .replace(/_/g, ' ')
+          .trim();
+
+        const moduleTitle = cleanTopic ? `Module ${moduleCounter}: ${cleanTopic}` : `Module ${moduleCounter}`;
+
+        currentModule = {
+          id: moduleCounter,
+          title: moduleTitle,
+          videos: [item],
+        };
+        modules.push(currentModule);
+        moduleCounter++;
+      } else {
+        currentModule.videos.push(item);
+      }
+    }
+
+    return modules;
+  }, [videos, groupByModule]);
 
   if (loading) {
     return (
@@ -198,16 +237,32 @@ export default function DashboardPage() {
               </button>
             </div>
 
-            {/* Sort Order Toggle: Upload Order vs Newest First */}
-            <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-300">
-              <ArrowDownUp className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="text-slate-400 hidden sm:inline">Order:</span>
+            {/* Controls: Group by Module (01_...) & Sort Order */}
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Group By Module Toggle */}
               <button
-                onClick={() => setSortOrder(sortOrder === 'upload_asc' ? 'upload_desc' : 'upload_asc')}
-                className="font-semibold text-cyan-400 hover:underline cursor-pointer"
+                onClick={() => setGroupByModule(!groupByModule)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                  groupByModule
+                    ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-400'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+                title="Separate course modules starting with 01"
               >
-                {sortOrder === 'upload_asc' ? 'Upload Order (Oldest → Newest #1, #2...)' : 'Newest Uploads First'}
+                <Layers className="w-3.5 h-3.5" />
+                <span>{groupByModule ? 'Module Sections (By 01)' : 'Flat Grid'}</span>
               </button>
+
+              {/* Sort Order Toggle */}
+              <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-300">
+                <ArrowDownUp className="w-3.5 h-3.5 text-cyan-400" />
+                <button
+                  onClick={() => setSortOrder(sortOrder === 'upload_asc' ? 'upload_desc' : 'upload_asc')}
+                  className="font-semibold text-cyan-400 hover:underline cursor-pointer"
+                >
+                  {sortOrder === 'upload_asc' ? 'Upload Order (#1, #2...)' : 'Newest First'}
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -254,26 +309,53 @@ export default function DashboardPage() {
               {activeSection === 'video' && '📹 Channel Videos'}
               {activeSection === 'pdf' && '📄 PDFs & Documents'}
             </span>
-            <span className="text-xs font-mono text-cyan-400 font-normal">({videos.length} items)</span>
+            <span className="text-xs font-mono text-cyan-400 font-normal">
+              ({videos.length} items • {groupedModules.length} module sections)
+            </span>
           </h2>
-
-          <span className="text-xs text-slate-500 font-mono">
-            {sortOrder === 'upload_asc' ? 'Sorted in upload order (#1, #2...)' : 'Sorted by newest'}
-          </span>
         </div>
 
-        {/* Media Grid Section */}
-        <section>
+        {/* Media Grid Section (Rendered as Module Sections or Flat Grid) */}
+        <section className="space-y-10">
           {videos.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-              {videos.map((item) => (
-                <VideoCard
-                  key={item._id}
-                  video={item}
-                  onFavoriteToggle={handleFavoriteToggle}
-                />
-              ))}
-            </div>
+            groupByModule && groupedModules.length > 0 ? (
+              /* Grouped Module Sections: Separating each 01-XX course part cleanly */
+              groupedModules.map((mod) => (
+                <div key={mod.id} className="space-y-4 pt-2 first:pt-0">
+                  {/* Module Section Header */}
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center font-mono font-bold text-xs text-cyan-400">
+                        {String(mod.id).padStart(2, '0')}
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white tracking-wide">{mod.title}</h3>
+                        <p className="text-[11px] text-slate-400 font-mono">
+                          {mod.videos.length} {mod.videos.length === 1 ? 'item' : 'items'} •{' '}
+                          {mod.videos.filter((v) => v.progress?.status === 'completed').length} completed
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="h-px flex-1 bg-gradient-to-r from-slate-800 to-transparent mx-6 hidden md:block" />
+                  </div>
+
+                  {/* Module Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                    {mod.videos.map((item) => (
+                      <VideoCard key={item._id} video={item} onFavoriteToggle={handleFavoriteToggle} />
+                    ))}
+                  </div>
+                </div>
+              ))
+            ) : (
+              /* Flat Grid View */
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                {videos.map((item) => (
+                  <VideoCard key={item._id} video={item} onFavoriteToggle={handleFavoriteToggle} />
+                ))}
+              </div>
+            )
           ) : (
             <div className="p-12 text-center rounded-3xl bg-slate-900/40 border border-slate-800/80 space-y-4">
               <div className="w-12 h-12 mx-auto rounded-full bg-slate-800 flex items-center justify-center text-slate-500">
