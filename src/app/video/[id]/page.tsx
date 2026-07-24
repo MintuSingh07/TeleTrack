@@ -215,7 +215,8 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
     }
   };
 
-  const handleMarkPdfCompleted = () => {
+  // Explicit Toggle "Mark as Complete" Action
+  const handleToggleComplete = () => {
     const isComp = status === 'completed';
     const nextStatus = isComp ? 'not_started' : 'completed';
     const nextPct = isComp ? 0 : 100;
@@ -275,7 +276,7 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-6 space-y-6">
         {/* Back Link & Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-4">
           <Link
             href="/"
             className="inline-flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-white transition-colors"
@@ -284,11 +285,23 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
             <span>Back to Dashboard</span>
           </Link>
 
-          {/* Status Badge */}
-          <div className="flex items-center gap-2">
+          {/* Status Badge & Mark as Complete Action */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleToggleComplete}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer shadow-md ${
+                status === 'completed'
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/30'
+                  : 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white hover:from-emerald-400 hover:to-teal-500 shadow-emerald-500/20'
+              }`}
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>{status === 'completed' ? 'Marked as Complete' : 'Mark as Complete'}</span>
+            </button>
+
             {status === 'completed' && (
               <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Completed
+                Completed
               </span>
             )}
             {status === 'watching' && (
@@ -500,8 +513,8 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
               )}
             </div>
 
-            {/* Non-draggable Progress Bar Indicator */}
-            <div className="p-6 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-3">
+            {/* Non-draggable Progress Bar Indicator & Mark as Complete Action */}
+            <div className="p-6 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4">
               <div className="flex justify-between items-center text-xs font-semibold text-slate-300 uppercase tracking-wider">
                 <span>{isPdf ? 'Reading Progress' : 'Watch Progress'}</span>
                 <span className="text-cyan-400 font-mono text-sm">{watchPercentage}%</span>
@@ -519,16 +532,18 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
                 />
               </div>
 
-              {/* PDF Mark Completed Action */}
-              {isPdf && (
-                <button
-                  onClick={handleMarkPdfCompleted}
-                  className="mt-2 w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  <CheckCircle2 className={`w-4 h-4 ${status === 'completed' ? 'text-emerald-400' : 'text-slate-400'}`} />
-                  <span>{status === 'completed' ? 'Marked as Completed' : 'Mark PDF as Completed'}</span>
-                </button>
-              )}
+              {/* Mark as Complete Action Button */}
+              <button
+                onClick={handleToggleComplete}
+                className={`w-full py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md ${
+                  status === 'completed'
+                    ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25'
+                    : 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white hover:from-emerald-400 hover:to-teal-500 shadow-emerald-500/20'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{status === 'completed' ? 'Marked as Complete (Click to undo)' : 'Mark as Complete'}</span>
+              </button>
             </div>
           </div>
 
